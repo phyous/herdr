@@ -105,6 +105,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
+        self.leave_active_endpoint_surface();
         self.reset_endpoint_projection();
         self.active_endpoint_id = ClientEndpointId::Local;
         self.mode = ClientShellMode::Terminal;
@@ -235,6 +236,7 @@ impl ClientShellState {
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
         if switching_endpoint {
+            self.leave_active_endpoint_surface();
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
             self.pending_pane_surface = None;
@@ -674,6 +676,49 @@ impl ClientShellState {
             self.snapshot = self.endpoints[index].snapshot.clone();
         }
         changed
+    }
+
+    pub(super) fn workspace_unread(&self, workspace_id: &str) -> Option<bool> {
+        let endpoint = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)?;
+        endpoint
+            .agent_presentation
+            .workspace_unread(endpoint.snapshot.as_deref()?, workspace_id)
+    }
+
+    pub(super) fn set_workspace_unread(&mut self, workspace_id: &str, unread: bool) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        else {
+            return;
+        };
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            return;
+        };
+        if unread {
+            endpoint
+                .agent_presentation
+                .mark_workspace_unread(snapshot, workspace_id);
+        } else {
+            endpoint
+                .agent_presentation
+                .mark_workspace_read(snapshot, workspace_id);
+        }
+        self.snapshot = endpoint.snapshot.clone();
+    }
+
+    fn leave_active_endpoint_surface(&mut self) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        {
+            endpoint.agent_presentation.leave_surface();
+        }
     }
 
     #[cfg(test)]

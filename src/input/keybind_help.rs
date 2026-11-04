@@ -139,6 +139,10 @@ pub(crate) fn keybind_help_groups(
                 ),
                 entry(binding_label(&keybinds.close_workspace), "close workspace"),
                 entry(
+                    binding_label(&keybinds.toggle_workspace_unread),
+                    "mark workspace unread / read",
+                ),
+                entry(
                     binding_label(&keybinds.previous_workspace),
                     "previous workspace",
                 ),

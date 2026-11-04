@@ -536,6 +536,12 @@
           "description": "Close the selected workspace."
         },
         {
+          "key": "keys.toggle_workspace_unread",
+          "type": "keybinding",
+          "default": "\"prefix+u\"",
+          "description": "Mark the selected workspace unread, or read when it has unseen agents. It shows as done until you return to it."
+        },
+        {
           "key": "keys.workspace_picker",
           "type": "keybinding",
           "default": "\"prefix+w\"",

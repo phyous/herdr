@@ -2,6 +2,28 @@ use super::*;
 
 impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
+        let mut items = self.target_items();
+        if let ClientContextMenuTarget::Workspace {
+            unread: Some(unread),
+            ..
+        } = &self.target
+        {
+            let after_rename = items
+                .iter()
+                .position(|item| item.action == ClientContextMenuAction::Rename)
+                .map_or(0, |index| index + 1);
+            items.insert(
+                after_rename,
+                ClientContextMenuItem {
+                    label: if *unread { "Mark read" } else { "Mark unread" },
+                    action: ClientContextMenuAction::ToggleUnread,
+                },
+            );
+        }
+        items
+    }
+
+    fn target_items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
@@ -108,6 +130,7 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
+        let unread = self.workspace_unread(&workspace_id);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -116,6 +139,7 @@ impl ClientShellState {
                 has_worktree_children,
                 close_group,
                 collapsed,
+                unread,
             },
             x,
             y,
@@ -195,8 +219,15 @@ impl ClientShellState {
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,
+                unread,
                 ..
-            } => self.activate_workspace_context_action(workspace_id, close_group, action, outcome),
+            } => self.activate_workspace_context_action(
+                workspace_id,
+                close_group,
+                unread,
+                action,
+                outcome,
+            ),
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
@@ -223,6 +254,7 @@ impl ClientShellState {
         &mut self,
         workspace_id: String,
         close_group: bool,
+        unread: Option<bool>,
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
@@ -250,6 +282,11 @@ impl ClientShellState {
             }
             ClientContextMenuAction::Close => {
                 self.request_workspace_close(workspace_id, Some(close_group), outcome);
+            }
+            ClientContextMenuAction::ToggleUnread => {
+                if let Some(unread) = unread {
+                    self.set_workspace_unread(&workspace_id, !unread);
+                }
             }
             ClientContextMenuAction::NewWorktree => {
                 self.begin_worktree_action_for(KeybindAction::NewWorktree, workspace_id, outcome)

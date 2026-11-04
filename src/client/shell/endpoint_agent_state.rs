@@ -3,12 +3,19 @@ use std::collections::{HashMap, HashSet};
 use crate::api::schema::AgentStatus;
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
+#[derive(Clone, Debug)]
+enum UnreadMark {
+    Presented,
+    Away,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct EndpointAgentPresentation {
     boot_id: Option<String>,
     acknowledged: HashMap<String, u64>,
     completed: HashMap<String, u64>,
     working: HashSet<String>,
+    unread_marks: HashMap<String, UnreadMark>,
     pending_completions: Option<(
         Option<u64>,
         crate::protocol::endpoint::EndpointAgentCompletions,
@@ -50,6 +57,7 @@ impl EndpointAgentPresentation {
             self.acknowledged.clear();
             self.completed.clear();
             self.working.clear();
+            self.unread_marks.clear();
             self.acknowledged.extend(
                 snapshot
                     .agents
@@ -68,6 +76,8 @@ impl EndpointAgentPresentation {
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.working
             .retain(|pane_id| pane_ids.contains(pane_id.as_str()));
+        self.unread_marks
+            .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         let completions = self
             .pending_completions
             .take()
@@ -130,6 +140,11 @@ impl EndpointAgentPresentation {
         }
 
         let mut changed = false;
+        for (pane_id, mark) in &mut self.unread_marks {
+            if !surface.panes.iter().any(|pane| &pane.pane_id == pane_id) {
+                *mark = UnreadMark::Away;
+            }
+        }
         for pane in &surface.panes {
             let Some(agent) = snapshot
                 .agents
@@ -138,6 +153,14 @@ impl EndpointAgentPresentation {
             else {
                 continue;
             };
+            match self.unread_marks.get(&agent.pane_id) {
+                Some(UnreadMark::Presented) => continue,
+                Some(UnreadMark::Away) => {
+                    self.unread_marks.remove(&agent.pane_id);
+                    changed = true;
+                }
+                None => {}
+            }
             let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
             if *acknowledged < agent.state_change_seq {
                 *acknowledged = agent.state_change_seq;
@@ -145,20 +168,92 @@ impl EndpointAgentPresentation {
             }
         }
         if changed {
-            for agent in &mut snapshot.agents {
-                agent.agent_status = self.projected_status(agent);
-            }
-            project_aggregate_status(snapshot);
+            self.project_statuses(snapshot);
         }
         changed
     }
 
+    pub(super) fn workspace_unread(
+        &self,
+        snapshot: &ClientShellSnapshot,
+        workspace_id: &str,
+    ) -> Option<bool> {
+        let mut agents = snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.workspace_id == workspace_id);
+        let first = agents.next()?;
+        Some(!self.seen(first) || agents.any(|agent| !self.seen(agent)))
+    }
+
+    pub(super) fn mark_workspace_unread(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        workspace_id: &str,
+    ) {
+        let active_tab_id = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == workspace_id)
+            .map(|workspace| workspace.active_tab_id.as_str());
+        let agents = || {
+            snapshot
+                .agents
+                .iter()
+                .filter(|agent| agent.workspace_id == workspace_id)
+        };
+        let active_tab_has_agents =
+            agents().any(|agent| Some(agent.tab_id.as_str()) == active_tab_id);
+        for agent in agents()
+            .filter(|agent| !active_tab_has_agents || Some(agent.tab_id.as_str()) == active_tab_id)
+        {
+            let mark = if snapshot.focused_tab_id.as_ref() == Some(&agent.tab_id) {
+                UnreadMark::Presented
+            } else {
+                UnreadMark::Away
+            };
+            self.unread_marks.insert(agent.pane_id.clone(), mark);
+        }
+        self.project_statuses(snapshot);
+    }
+
+    pub(super) fn mark_workspace_read(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        workspace_id: &str,
+    ) {
+        for agent in snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.workspace_id == workspace_id)
+        {
+            self.unread_marks.remove(&agent.pane_id);
+            let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
+            *acknowledged = (*acknowledged).max(agent.state_change_seq);
+        }
+        self.project_statuses(snapshot);
+    }
+
+    pub(super) fn leave_surface(&mut self) {
+        for mark in self.unread_marks.values_mut() {
+            *mark = UnreadMark::Away;
+        }
+    }
+
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
-        self.completed.get(&agent.pane_id).is_none_or(|completion| {
-            self.acknowledged
-                .get(&agent.pane_id)
-                .is_some_and(|sequence| sequence >= completion)
-        })
+        !self.unread_marks.contains_key(&agent.pane_id)
+            && self.completed.get(&agent.pane_id).is_none_or(|completion| {
+                self.acknowledged
+                    .get(&agent.pane_id)
+                    .is_some_and(|sequence| sequence >= completion)
+            })
+    }
+
+    fn project_statuses(&self, snapshot: &mut ClientShellSnapshot) {
+        for agent in &mut snapshot.agents {
+            agent.agent_status = self.projected_status(agent);
+        }
+        project_aggregate_status(snapshot);
     }
 
     fn projected_status(&self, agent: &ClientShellAgent) -> AgentStatus {
@@ -474,5 +569,67 @@ mod tests {
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(1), Some(true)));
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(2), Some(false)));
         assert_eq!(completed.agents[0].agent_status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn unread_mark_on_a_presented_agent_holds_until_it_leaves_and_returns() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut snapshot = snapshot(AgentStatus::Idle, 4, 1);
+        snapshot.focused_tab_id = Some("tab".into());
+        presentation.project_snapshot(&mut snapshot);
+        let presented = surface(1);
+        let mut away = surface(1);
+        away.panes.clear();
+
+        presentation.mark_workspace_unread(&mut snapshot, "workspace");
+        presentation.acknowledge_surface(&mut snapshot, &presented, Some(true));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Done);
+        presentation.acknowledge_surface(&mut snapshot, &away, Some(true));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Done);
+
+        assert!(presentation.acknowledge_surface(&mut snapshot, &presented, Some(true)));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn mark_read_acknowledges_an_unpresented_completion() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut initial = snapshot(AgentStatus::Working, 4, 1);
+        presentation.project_snapshot(&mut initial);
+        let mut completed = snapshot(AgentStatus::Idle, 5, 2);
+        presentation.project_snapshot(&mut completed);
+
+        presentation.mark_workspace_read(&mut completed, "workspace");
+
+        assert_eq!(completed.agents[0].agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn workspace_unread_marks_the_active_tab_and_falls_back_to_every_agent() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut snapshot = snapshot(AgentStatus::Idle, 4, 1);
+        snapshot.workspaces[0].workspace_id = "workspace".into();
+        snapshot.workspaces[0].active_tab_id = "tab".into();
+        let mut background = agent(AgentStatus::Idle, 4);
+        background.pane_id = "background-pane".into();
+        background.tab_id = "other-tab".into();
+        snapshot.agents.push(background);
+        presentation.project_snapshot(&mut snapshot);
+        let statuses = |snapshot: &ClientShellSnapshot| {
+            snapshot
+                .agents
+                .iter()
+                .map(|agent| agent.agent_status)
+                .collect::<Vec<_>>()
+        };
+
+        presentation.mark_workspace_unread(&mut snapshot, "workspace");
+        assert_eq!(statuses(&snapshot), [AgentStatus::Done, AgentStatus::Idle]);
+        presentation.acknowledge_surface(&mut snapshot, &surface(1), Some(true));
+        assert_eq!(statuses(&snapshot), [AgentStatus::Idle, AgentStatus::Idle]);
+
+        snapshot.workspaces[0].active_tab_id = "shell-tab".into();
+        presentation.mark_workspace_unread(&mut snapshot, "workspace");
+        assert_eq!(statuses(&snapshot), [AgentStatus::Done, AgentStatus::Done]);
     }
 }

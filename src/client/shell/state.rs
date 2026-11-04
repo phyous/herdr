@@ -516,6 +516,7 @@ pub(super) enum ClientContextMenuAction {
     OpenWorktree,
     RemoveWorktree,
     ToggleGroup,
+    ToggleUnread,
     NewTab,
     RenamePane,
     ClearPaneName,
@@ -536,6 +537,7 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        unread: Option<bool>,
     },
     Tab {
         tab_id: String,

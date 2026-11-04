@@ -25,11 +25,11 @@ impl ClientShellState {
                         action,
                         crate::input::KeybindAction::RenameWorkspace
                             | crate::input::KeybindAction::CloseWorkspace
+                            | crate::input::KeybindAction::ToggleWorkspaceUnread
                     )
                 {
                     self.receive_endpoint_unavailable(
-                        "Select an available workspace and press Enter before renaming or closing it"
-                            .into(),
+                        "Select an available workspace and press Enter before changing it".into(),
                     );
                     outcome.repaint = true;
                     return;
@@ -108,6 +108,15 @@ impl ClientShellState {
                 if action == crate::input::KeybindAction::CloseWorkspace {
                     if let Some(workspace_id) = self.workspace_action_id() {
                         self.request_workspace_close(workspace_id, None, outcome);
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                if action == crate::input::KeybindAction::ToggleWorkspaceUnread {
+                    if let Some(workspace_id) = self.workspace_action_id() {
+                        if let Some(unread) = self.workspace_unread(&workspace_id) {
+                            self.set_workspace_unread(&workspace_id, !unread);
+                        }
                     }
                     outcome.repaint = true;
                     return;
