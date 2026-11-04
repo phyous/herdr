@@ -2010,6 +2010,94 @@ fn unselected_endpoint_completion_projects_done_client_side() {
     assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
 }
 
+fn unread_menu_item(state: &ClientShellState) -> (usize, &'static str) {
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("workspace context menu");
+    };
+    menu.items()
+        .iter()
+        .enumerate()
+        .find(|(_, item)| item.action == ClientContextMenuAction::ToggleUnread)
+        .map(|(index, item)| (index, item.label))
+        .expect("unread menu item")
+}
+
+#[test]
+fn workspace_marked_unread_stays_done_while_viewed_and_prefix_u_marks_it_read() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut local = snapshot();
+    local.agents = vec![agent("reviewer", AgentStatus::Idle, 1)];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+    let workspace_status = |state: &ClientShellState| {
+        state
+            .snapshot
+            .as_deref()
+            .map(|snapshot| snapshot.workspaces[0].agent_status)
+    };
+
+    state.open_workspace_context_menu("ws_1".into(), 0, 0);
+    let item = unread_menu_item(&state);
+    assert_eq!(item.1, "Mark unread");
+    state.activate_context_menu_item(item.0, &mut ClientShellInput::default());
+    state.set_pane_surface(surface());
+    assert_eq!(workspace_status(&state), Some(AgentStatus::Done));
+
+    for (code, modifiers) in [
+        (KeyCode::Char('b'), KeyModifiers::CONTROL),
+        (KeyCode::Char('u'), KeyModifiers::NONE),
+    ] {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            code, modifiers,
+        ))]);
+    }
+    assert_eq!(workspace_status(&state), Some(AgentStatus::Idle));
+}
+
+#[test]
+fn workspace_unread_menu_item_applies_the_direction_it_showed() {
+    use crate::api::schema::AgentStatus;
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut local = snapshot();
+    local.agents = vec![agent("reviewer", AgentStatus::Idle, 1)];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+
+    state.open_workspace_context_menu("ws_1".into(), 0, 0);
+    let (index, _) = unread_menu_item(&state);
+    state.set_workspace_unread("ws_1", true);
+    state.activate_context_menu_item(index, &mut ClientShellInput::default());
+
+    assert_eq!(
+        state.snapshot.as_deref().unwrap().workspaces[0].agent_status,
+        AgentStatus::Done
+    );
+}
+
+#[test]
+fn workspace_marked_unread_clears_after_returning_from_another_machine() {
+    use crate::api::schema::AgentStatus;
+
+    let (mut state, remote_id) = state_with_remote();
+    let mut local = snapshot();
+    local.agents = vec![agent("reviewer", AgentStatus::Idle, 1)];
+    state.set_snapshot(Box::new(local));
+    state.set_pane_surface(surface());
+    state.set_workspace_unread("ws_1", true);
+
+    assert!(state.activate_endpoint_projection(&remote_id));
+    assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
+    state.set_pane_surface(surface());
+
+    assert_eq!(
+        state.snapshot.as_deref().unwrap().workspaces[0].agent_status,
+        AgentStatus::Idle
+    );
+}
+
 #[test]
 fn clicking_remote_machine_name_requests_activation_without_mutating_projection() {
     let (mut state, endpoint_id) = state_with_remote();
